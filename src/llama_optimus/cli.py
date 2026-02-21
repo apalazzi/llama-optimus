@@ -72,10 +72,19 @@ def main():
 
     # Check the operating system and build llama_bench_path
     if platform.system() == "Windows":
-        llama_bench_path = f"{llama_bin_path}/Release/llama-bench.exe"
-        # Sanity-check
+        # Prebuilt binaries from GitHub releases use a flat directory layout,
+        # while CMake source builds place binaries under a Release/ subdirectory.
+        llama_bench_path = f"{llama_bin_path}/llama-bench.exe"
+
         if not Path(llama_bench_path).is_file():
-            sys.exit(f"ERROR: llama-bench.exe not found at {llama_bench_path}")
+            llama_bench_path = f"{llama_bin_path}/Release/llama-bench.exe"
+        if not Path(llama_bench_path).is_file():
+            sys.exit(
+                f"ERROR: llama-bench.exe not found.\n"
+                f"  Searched:\n"
+                f"    {llama_bin_path}/llama-bench.exe\n"
+                f"    {llama_bin_path}/Release/llama-bench.exe"
+            )
     else:
         llama_bench_path = f"{llama_bin_path}/llama-bench"
         # Sanity-check

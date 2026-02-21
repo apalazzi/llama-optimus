@@ -8,7 +8,6 @@ import shutil
 import pandas as pd 
 import tempfile
 import subprocess
-import shlex
 from optuna.samplers import TPESampler
 from optuna.samplers import GridSampler
 from .override_patterns import OVERRIDE_PATTERNS   
@@ -535,7 +534,9 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     print("")
 
     # launch optimized bench
-    subprocess.run(shlex.split(llama_bench_cmd), check=True)
+    # Use shell=True instead of shlex.split() because shlex interprets
+    # backslashes as escape characters, breaking Windows paths.
+    subprocess.run(llama_bench_cmd, check=True, shell=True)
 
 
     print("")
@@ -552,7 +553,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     print("")
 
     # launch non-optimized (default) bench
-    subprocess.run(shlex.split(llama_bench_cmd_default), check=True)
+    subprocess.run(llama_bench_cmd_default, check=True, shell=True)
 
     # [TBD] add % of improvement 
 
