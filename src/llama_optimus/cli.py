@@ -4,7 +4,7 @@
 import argparse, os, sys
 import platform 
 from pathlib import Path   
-from .core import run_optimization, estimate_max_ngl, warmup_until_stable
+from .core import run_optimization, estimate_max_ngl, warmup_until_stable, validate_device
 from .override_patterns import OVERRIDE_PATTERNS   
 from .search_space import SEARCH_SPACE, max_threads 
 
@@ -62,6 +62,12 @@ def main():
     parser.add_argument("--override-mode", type=str, default="scan", choices=["none", "scan", "custom"],
     help=f"'none': do not scan this parameter; scan: 'scan' over preset override-tensor patterns; " \
     f"'custom': (future) user provides their own pattern(s). Available override patterns: {OVERRIDE_PATTERNS.keys()}" )
+
+    parser.add_argument("--device", type=str, default=None,
+    help="llama.cpp device selector passed as --device to llama-bench/llama-server. "
+         "Accepts 'auto' (default), 'none', a device name, or '/'-separated combos "
+         "(e.g. 'CUDA0', 'Metal0', 'CUDA1/CUDA0'). If omitted, llama.cpp uses its default ('auto'). "
+         "Run '<llama-bin>/llama-bench --list-devices' to see available device names.")
     
     args = parser.parse_args()
 
@@ -109,6 +115,10 @@ def main():
         print(f"ERROR: llama-bench not found at {llama_bench_path}. ...", file=sys.stderr)
         sys.exit(1)
 
+    # validate the user-provided --device value before any llama-bench call
+    if not validate_device(llama_bench_path, args.device):
+        sys.exit(1)
+
     print("")
     print("#################")
     print("# LLAMA-OPTIMUS #")
@@ -118,6 +128,7 @@ def main():
     print(f"Number of CPUs: {max_threads}.")
     print(f"Path to 'llama-bench':{llama_bench_path}")  # in llama.cpp/tools/
     print(f"Path to 'model.gguf' file:{model_path}")
+    print(f"Device selection (--device): {args.device if args.device is not None else 'auto (default)'}")
     print("")
 
     # default: estimate maximum number of layers before run_optimization 
@@ -136,7 +147,7 @@ def main():
 
         SEARCH_SPACE['gpu_layers']['high'] = estimate_max_ngl(
             llama_bench_path=llama_bench_path, model_path=model_path, 
-            min_ngl=0, max_ngl=SEARCH_SPACE['gpu_layers']['high'])
+            min_ngl=0, max_ngl=SEARCH_SPACE['gpu_layers']['high'], device=args.device)
         print("")
         print(f"Setting maximum -ngl to {SEARCH_SPACE['gpu_layers']['high']}")
         print("")
@@ -169,7 +180,7 @@ def main():
         # launch warmup
         warmup_until_stable(llama_bench_path=llama_bench_path, model_path=model_path, metric=args.metric, 
                             ngl=max_ngl_wup, min_runs=4, n_warmup_runs=args.n_warmup_runs,
-                            n_warmup_tokens=args.n_warmup_tokens, max_threads=max_threads)
+                            n_warmup_tokens=args.n_warmup_tokens, max_threads=max_threads, device=args.device)
 
     print("")
     print("##################################")
@@ -179,7 +190,7 @@ def main():
 
     run_optimization(n_trials=args.trials, n_tokens=args.n_tokens, metric=args.metric, 
                      repeat=args.repeat, llama_bench_path=llama_bench_path, 
-                     model_path=model_path, llama_bin_path=llama_bin_path, override_mode=args.override_mode)  
+                     model_path=model_path, llama_bin_path=llama_bin_path, override_mode=args.override_mode, device=args.device)  
 
 if __name__ == "__main__":
 

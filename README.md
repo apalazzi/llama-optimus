@@ -23,6 +23,7 @@ Brings Bayesian optimization (Optuna) to your local & embedded AI models.
 - **Tunes** `llama.cpp` parameters for maximum `tokens/sec`, using automated parameter search.
 - **Bayesian optimization** (Optuna) is used to maximize tokens/sec for prompt processing, generation or both
 - **Estimates user-specified GPU layer count (`-ngl`).**
+- **Device selection (`--device`)**: target a specific llama.cpp backend device (or a `/`-separated combo) for all benchmarks, validated up front against `llama-bench --list-devices`.
 - **Supports override patterns for --override-tensor**: allows you to optimize advanced memory offloading for large models or low VRAM systems.
 - **Built in system warmup** to ensure benchmarking is done under real-world, “steady-state” conditions.
 - **Grid search over categorical parameters** (for flags like --override-tensor and --flash-attn ) combined with Bayesian tuning of numerical ones.
@@ -185,6 +186,8 @@ llama-optimus --trials 25 -r 3 --metric tg
   `tg` = token generation speed,
   `pp` = prompt processing speed,
   `mean` = average of both
+
+* `--device`  llama.cpp device selector passed as `--device` (default: not set → llama.cpp uses `auto`). Accepts `auto`, `none`, a device name, or `/`-separated combos (e.g. `CUDA0`, `Metal0`, `CUDA1/CUDA0`). Run `<llama-bin>/llama-bench --list-devices` to see available device names.
 
 * `-r` / `--repeat` How many repetitions per configuration (default: 2; use 1 for quick/dirty, 5 for robust)
 

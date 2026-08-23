@@ -4,6 +4,7 @@
 import re
 import optuna
 import os
+import sys
 import shutil
 import pandas as pd 
 import tempfile
@@ -13,7 +14,89 @@ from optuna.samplers import GridSampler
 from .override_patterns import OVERRIDE_PATTERNS   
 from .search_space import SEARCH_SPACE, max_threads 
 
-def estimate_max_ngl(llama_bench_path, model_path, min_ngl=0, max_ngl=SEARCH_SPACE['gpu_layers']['high']):
+def list_available_devices(llama_bench_path):
+    """
+    Run `llama-bench --list-devices` and return the list of available (non-CPU)
+    device names, e.g. ['CUDA0', 'CUDA1', 'Metal0'].
+
+    Returns:
+        list[str]: The device names, or None if the command could not be executed
+        (e.g. an older llama.cpp build without the flag, or a missing binary).
+    """
+    try:
+        result = subprocess.run(
+            [llama_bench_path, "--list-devices"],
+            capture_output=True, text=True, timeout=120, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+
+    names = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith("available devices"):
+            continue
+        if stripped == "(none)":
+            continue
+        # each device line looks like:
+        #   "  CUDA0: NVIDIA GeForce RTX 4090 (24576 MiB, 20480 MiB free)"
+        name = stripped.split(":", 1)[0].strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def validate_device(llama_bench_path, device):
+    """
+    Validate that the user-provided --device value is usable on this system.
+
+    'auto' and 'none' are always accepted. Any concrete device name (or a
+    '/'-separated combination such as 'CUDA1/CUDA0') must appear in the output
+    of `llama-bench --list-devices`.
+
+    Returns:
+        bool: True if the value is valid (or could not be validated), False if a
+        concrete device name is missing from the available device list.
+    """
+    if device is None:
+        return True
+
+    d = device.strip()
+    if d.lower() in ("auto", "none"):
+        return True
+
+    requested = [part.strip() for part in d.split("/") if part.strip()]
+    if not requested:
+        print(f"ERROR: --device value '{device}' is empty/invalid.", file=sys.stderr)
+        return False
+
+    available = list_available_devices(llama_bench_path)
+    if available is None:
+        print("WARNING: could not run `llama-bench --list-devices`; skipping device validation.")
+        print(f"Proceeding with --device {device}. If it is invalid, llama.cpp will report an error.")
+        return True
+
+    missing = [name for name in requested if name not in available]
+    if missing:
+        print("", file=sys.stderr)
+        print("ERROR: the following --device name(s) are not available on this system:", file=sys.stderr)
+        for name in missing:
+            print(f"  - {name}", file=sys.stderr)
+        print("Available devices:", file=sys.stderr)
+        if available:
+            for name in available:
+                print(f"  - {name}", file=sys.stderr)
+        else:
+            print("  (none - no non-CPU devices detected)", file=sys.stderr)
+        print("", file=sys.stderr)
+        return False
+
+    print(f"Validated --device {device} (available: {', '.join(available)})")
+    return True
+
+
+def estimate_max_ngl(llama_bench_path, model_path, min_ngl=0, max_ngl=SEARCH_SPACE['gpu_layers']['high'], device=None):
     """
     Estimate the maximum number of model layers (-ngl) that can be loaded into GPU/VRAM
     for the current hardware and selected model. Uses a binary search, running llama-bench
@@ -42,6 +125,8 @@ def estimate_max_ngl(llama_bench_path, model_path, min_ngl=0, max_ngl=SEARCH_SPA
             "-ngl", str(mid),
             "-o", "csv"
         ]
+        if device is not None:
+            cmd += ["--device", device]
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=620, check=True)
             low = mid  # success → try higher
@@ -119,7 +204,7 @@ def run_llama_bench_with_csv(cmd, metric):
     return metric_value
 
 
-def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path):
+def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, device=None):
     """
     Objective function for Optuna optimization. Samples a set of performance parameters,
     builds the llama-bench command, runs the benchmark, and returns the throughput metric.
@@ -160,6 +245,8 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path):
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
     ]
+    if device is not None:
+        cmd_1 += ["--device", device]
     # note1: memory mapping is now set by default. Instead, need to add --no-map flag. 
     # note2: use "-r 5" for more robust results (mean value calculated over 5 llama-bench runs); Use "-r 1" for quick assessment 
 
@@ -186,7 +273,7 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path):
     # i.e. this trial will be considered a failure but not fatal.
 
 
-def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers):
+def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers, device=None):
     """
     Objective function for Optuna scan over the entire categorical parameter space
 
@@ -213,6 +300,8 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
     ]
+    if device is not None:
+        cmd_2 += ["--device", device]
 
     # Add task-specific flags
     if metric in ("tg"):
@@ -247,7 +336,7 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         return 0.0
 
 
-def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, flash_attn, override_mode):
+def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, flash_attn, override_mode, device=None):
     """
     Objective function for Optuna optimization. 
     After we select promising '--override-tensor' and '--flash-attn'
@@ -281,6 +370,8 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
     ]
+    if device is not None:
+        cmd_3 += ["--device", device]
 
     # Add task-specific flags
     if metric in ("tg"):
@@ -316,7 +407,7 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         return 0.0
 
 
-def warmup_until_stable(llama_bench_path, model_path, metric, ngl, min_runs, n_warmup_runs, n_warmup_tokens, max_threads):
+def warmup_until_stable(llama_bench_path, model_path, metric, ngl, min_runs, n_warmup_runs, n_warmup_tokens, max_threads, device=None):
     """
     Warm-up doctrine:
     - Always run at least 4 warmup cycles before checking for stability.
@@ -341,6 +432,8 @@ def warmup_until_stable(llama_bench_path, model_path, metric, ngl, min_runs, n_w
         "-p", str(n_warmup_tokens), 
         "-o", "csv"
     ]
+    if device is not None:
+        cmd_wup += ["--device", device]
 
     print("")
     print(f"warmup cmd: {cmd_wup}")
@@ -361,7 +454,7 @@ def warmup_until_stable(llama_bench_path, model_path, metric, ngl, min_runs, n_w
     return history
 
 
-def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model_path, llama_bin_path, override_mode):  
+def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model_path, llama_bin_path, override_mode, device=None):  
     """
     Run the Optuna optimization loop for a given number of trials, using the provided metric.
     At the end, print the best configuration and ready-to-use commands for llama-server/llama-bench.
@@ -391,7 +484,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     sampler = TPESampler(multivariate=True)  # Others: "random": RandomSampler(); "cmaes": CmaEsSampler(),
     study_1 = optuna.create_study(direction="maximize", sampler=sampler)
     # use lambda to inject metric, repeat ...  
-    study_1.optimize(lambda trial: objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path), n_trials=n_trials)
+    study_1.optimize(lambda trial: objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, device), n_trials=n_trials)
     print("")
     print("Best config Stage_1:", study_1.best_trial.params) 
     print(f"Best Stage_1 {metric} tokens/sec:", study_1.best_value)
@@ -426,7 +519,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     # use lambda to inject metric, repeat ...  
     study_2.optimize(lambda trial: objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
                                                override_mode, best_1['batch'], best_1['u_batch'], 
-                                               best_1['threads'], best_1['gpu_layers']), n_trials=n_trials_2)
+                                               best_1['threads'], best_1['gpu_layers'], device), n_trials=n_trials_2)
     print("")
     print("Best config Stage_2:", study_2.best_trial.params)
     print(f"Best Stage_2 {metric} tokens/sec:", study_2.best_value)
@@ -451,7 +544,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     study_3 = optuna.create_study(direction="maximize", sampler=sampler_3)
     # use lambda to inject metric, repeat ...  
     study_3.optimize(lambda trial: objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
-                                               best_2['override_tensor'], best_2['flash_attn'], override_mode), n_trials=n_trials)
+                                               best_2['override_tensor'], best_2['flash_attn'], override_mode, device), n_trials=n_trials)
     print("")
     print("Best config Stage_3:", study_3.best_trial.params)
     print(f"Best Stage_3 {metric} tokens/sec:", study_3.best_value)
@@ -479,6 +572,9 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" -ngl {best_3['gpu_layers']}"
         #f" --flash-attn-type {best['flash_type']}"
     )
+
+    if device is not None:
+        llama_server_cmd += f" --device {device}"
 
     if best_2['override_tensor'] != "none":
         llama_server_cmd += f'  --override-tensor "{OVERRIDE_PATTERNS[best_2["override_tensor"]]}" '  # only add if --override-tensor key is != "none" 
@@ -513,6 +609,9 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" -n 128 -p 256 -r 6 --no-warmup --progress "
     )
 
+    if device is not None:
+        llama_bench_cmd += f" --device {device}"
+
     if best_2['override_tensor'] != "none":
         llama_bench_cmd += f' --override-tensor "{OVERRIDE_PATTERNS[best_2["override_tensor"]]}" ' # concatenate string if --override-tensor key is != "none" 
 
@@ -523,6 +622,8 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" --model {model_path}"    # path_to_model.gguf
         f" -n 128 -p 256 -r 6 --no-warmup --progress " # internal llama-bench --no-warmup; unrelated to llama-optimus warm-up flag
     )
+    if device is not None:
+        llama_bench_cmd_default += f" --device {device}"
 
 
     print("########################################################")
