@@ -279,7 +279,7 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, d
     # i.e. this trial will be considered a failure but not fatal.
 
 
-def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers, cache_k, cache_v, device=None):
+def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers, cache_k, cache_v, device=None, no_flash_attn=None):
     """
     Objective function for Optuna scan over the entire categorical parameter space
 
@@ -320,17 +320,16 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
     if metric in ("mean"):
         cmd_2 += ["-n", str(n_tokens), "-p", str(2*n_tokens)]  # tokens to generate and process 
 
-    # remove flash-attn flag in case --flash-attn is 0 ; avoid possible misbehaviour in case `--flash-attn 0  != "" `
-    flash_attn   = trial.suggest_categorical('flash_attn', SEARCH_SPACE['flash_attn'])
-    if flash_attn == 1:  # in case of "0" option, do not pass the --flash-attn flag 
-        cmd_2 += ["--flash-attn", str(flash_attn)]  
+    # flash attention is always enabled; use --no-flash-attn CLI flag to disable
+    if SEARCH_SPACE['flash_attn'] == 1:
+        cmd_2 += ["--flash-attn", "1"]
 
     # include trials over --override-tensor only if "scan" is passes to args.override_tensor
     # and, if override_key == "none", the override-tensor flag is not inserted in cmd_2
     if override_mode == "scan":
         override_key = trial.suggest_categorical('override_tensor', list(OVERRIDE_PATTERNS.keys()))
         if override_key != "none":  # in case of "none" option, do not pass the no --override-tensor flag 
-            cmd_2 += ["--override-tensor", OVERRIDE_PATTERNS[override_key]]   
+            cmd_2 += ["--override-tensor", OVERRIDE_PATTERNS[override_key]]
 
     # debug 
     print("")
@@ -345,7 +344,7 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         return 0.0
 
 
-def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, flash_attn, override_mode, cache_k, cache_v, device=None):
+def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, override_mode, cache_k, cache_v, device=None, no_flash_attn=None):
     """
     Objective function for Optuna optimization. 
     After we select promising '--override-tensor' and '--flash-attn'
@@ -394,10 +393,9 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         cmd_3 += ["-n", str(n_tokens), "-p", str(2*n_tokens)]  # tokens to generate and process 
 
 
-    # remove flash-attn flag in case --flash-attn is 0 `
-    flash_attn   = trial.suggest_categorical('flash_attn', SEARCH_SPACE['flash_attn'])
-    if flash_attn == 1:  # in case of "0" option, do not pass the --flash-attn flag 
-        cmd_3 += ["--flash-attn", str(flash_attn)]  
+    # flash attention is always enabled; use --no-flash-attn CLI flag to disable
+    if SEARCH_SPACE['flash_attn'] == 1:
+        cmd_3 += ["--flash-attn", "1"]
 
     # include trials over --override-tensor only if "scan" is passes to args.override_tensor
     # in case override_key == "none", the override-tensor flag is not inserted in cmd_3
@@ -466,7 +464,7 @@ def warmup_until_stable(llama_bench_path, model_path, metric, ngl, min_runs, n_w
     return history
 
 
-def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model_path, llama_bin_path, override_mode, device=None):  
+def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model_path, llama_bin_path, override_mode, device=None, no_flash_attn=None):  
     """
     Run the Optuna optimization loop for a given number of trials, using the provided metric.
     At the end, print the best configuration and ready-to-use commands for llama-server/llama-bench.
@@ -514,16 +512,15 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
 
 
     # TRIALS: SECOND STAGE
-    if override_mode == "scan": 
-        n_override = len(OVERRIDE_PATTERNS)  # 
-        n_trials_2 = n_override * 2  # to cover all possibilities, since flash_attn: <0|1>
-        
+    if override_mode == "scan":
+        n_override = len(OVERRIDE_PATTERNS)  #
+        n_trials_2 = n_override  # flash_attn is fixed; only override_tensor is searched
+
         # define grid space
-        search2 = {'flash_attn': SEARCH_SPACE['flash_attn'],
-                   'override_tensor': SEARCH_SPACE['override_spc']}    
+        search2 = {'override_tensor': SEARCH_SPACE['override_spc']}
     else:
-        n_trials_2 = 2 # since flash_attn: <0|1> 
-        search2 = {'flash_attn': SEARCH_SPACE['flash_attn']} 
+        n_trials_2 = 1  # flash_attn is fixed; no categorical search
+        search2 = {}
 
     # Extract cache types from best_1 for Stage 2 and 3
     cache_combo_key = best_1['cache_type']
@@ -536,7 +533,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     study_2.optimize(lambda trial: objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
                                                override_mode, best_1['batch'], best_1['u_batch'], 
                                                best_1['threads'], best_1['gpu_layers'],
-                                               cache_k, cache_v, device), n_trials=n_trials_2)
+                                               cache_k, cache_v, device, no_flash_attn), n_trials=n_trials_2)
     print("")
     print("Best config Stage_2:", study_2.best_trial.params)
     print(f"Best Stage_2 {metric} tokens/sec:", study_2.best_value)
@@ -560,9 +557,10 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     sampler_3 = TPESampler(multivariate=True)  # Others: "random": RandomSampler(); "cmaes": CmaEsSampler(),
     study_3 = optuna.create_study(direction="maximize", sampler=sampler_3)
     # use lambda to inject metric, repeat ...  
+    # flash_attn is always enabled per search_space; no_flash_attn passed through
     study_3.optimize(lambda trial: objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
-                                               best_2['override_tensor'], best_2['flash_attn'], override_mode,
-                                               cache_k, cache_v, device), n_trials=n_trials)
+                                               best_2['override_tensor'], override_mode,
+                                               cache_k, cache_v, device, no_flash_attn), n_trials=n_trials)
     print("")
     print("Best config Stage_3:", study_3.best_trial.params)
     print(f"Best Stage_3 {metric} tokens/sec:", study_3.best_value)
@@ -600,7 +598,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         llama_server_cmd += f'  --override-tensor "{OVERRIDE_PATTERNS[best_2["override_tensor"]]}" '  # only add if --override-tensor key is != "none" 
 
     # for llama-server, --flash-att is of 'action' type (i.e. do not accept <0|1> values).
-    if best_2['flash_attn'] == 1:
+    if no_flash_attn is None:
         llama_server_cmd += f" --flash-attn "    
 
     print("")
@@ -626,10 +624,11 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" -ngl {best_3['gpu_layers']}"
         f" --cache-type-k {cache_k}"
         f" --cache-type-v {cache_v}"
-        f" --flash-attn {best_2['flash_attn']}"  # in llama-server, --flash-attn is type 'int', accepts <0|1> values.
         #f" --override-tensor {OVERRIDE_PATTERNS[best_2['override_tensor']]}"
         f" -n 128 -p 256 -r 6 --no-warmup --progress "
     )
+    if no_flash_attn is None:
+        llama_bench_cmd += " --flash-attn 1"  # in llama-bench, --flash-attn is type 'int', accepts <0|1> values.
 
     if device is not None:
         llama_bench_cmd += f" --device {device}"

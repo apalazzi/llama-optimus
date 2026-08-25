@@ -56,6 +56,9 @@ def main():
     parser.add_argument("--no-warmup", action="store_true", help="Skip the initial system warmup phase before " \
     "optimization (for debugging/testing).")
 
+    parser.add_argument("--no-flash-attn", action="store_true", help="Disable flash attention " \
+    "(--flash-attn flag is always added by default; pass this flag to skip it).")
+
     #parser.add_argument('--version', "-v", action='version', version='llama-optimus v0.1.0')
     parser.add_argument("--version", "-v", action='version', version=f'llama-optimus v{__version__}')
 
@@ -188,9 +191,9 @@ def main():
     print("##################################")
     print("")
 
-    run_optimization(n_trials=args.trials, n_tokens=args.n_tokens, metric=args.metric, 
-                     repeat=args.repeat, llama_bench_path=llama_bench_path, 
-                     model_path=model_path, llama_bin_path=llama_bin_path, override_mode=args.override_mode, device=args.device)  
+    run_optimization(n_trials=args.trials, n_tokens=args.n_tokens, metric=args.metric,
+                     repeat=args.repeat, llama_bench_path=llama_bench_path,
+                     model_path=model_path, llama_bin_path=llama_bin_path, override_mode=args.override_mode, device=args.device, no_flash_attn=args.no_flash_attn)  
 
 if __name__ == "__main__":
 
