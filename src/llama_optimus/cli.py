@@ -62,7 +62,7 @@ def main():
     #parser.add_argument('--version', "-v", action='version', version='llama-optimus v0.1.0')
     parser.add_argument("--version", "-v", action='version', version=f'llama-optimus v{__version__}')
 
-    parser.add_argument("--override-mode", type=str, default="scan", choices=["none", "scan", "custom"],
+    parser.add_argument("--override-mode", type=str, default="none", choices=["none", "scan", "custom"],
     help=f"'none': do not scan this parameter; scan: 'scan' over preset override-tensor patterns; " \
     f"'custom': (future) user provides their own pattern(s). Available override patterns: {OVERRIDE_PATTERNS.keys()}" )
 
