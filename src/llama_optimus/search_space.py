@@ -17,7 +17,7 @@ CACHE_COMBINATIONS = {
 SEARCH_SPACE = {
     'batch_size'     : {'low': 8, 'high': 16384},   # 
     'ubatch_size'    : {'low': 4, 'high': 8192},    #  
-    'threads':    {'low': 1, 'high': max_threads},  # Adjust range to your hardware
+    'threads':    [1, 2, 4],  # only these values are searched
     'gpu_layers': {'low': 0, 'high': 149},          # (-ngl) Set max according to model and VRAM; The max value must be determined for each setup
     'flash_attn': 1,                            # Always enabled; use --no-flash-attn CLI flag to disable       
     'override_spc'   : list(OVERRIDE_PATTERNS.keys()), # Read list from src/llama_optimus/override_patterns.py

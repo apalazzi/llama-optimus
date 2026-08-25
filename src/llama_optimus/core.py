@@ -220,7 +220,7 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, d
     # Sample params
     batch        = trial.suggest_int('batch', SEARCH_SPACE['batch_size']['low'], SEARCH_SPACE['batch_size']['high'])
     u_batch      = trial.suggest_int('u_batch', SEARCH_SPACE['ubatch_size']['low'], SEARCH_SPACE['ubatch_size']['high'])
-    threads      = trial.suggest_int('threads', SEARCH_SPACE['threads']['low'], SEARCH_SPACE['threads']['high'])
+    threads      = trial.suggest_categorical('threads', SEARCH_SPACE['threads'])
     gpu_layers   = trial.suggest_int('gpu_layers', SEARCH_SPACE['gpu_layers']['low'], SEARCH_SPACE['gpu_layers']['high'])
 
     # Sample cache type combination
@@ -364,7 +364,7 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
     # Sample params
     batch        = trial.suggest_int('batch', SEARCH_SPACE['batch_size']['low'], SEARCH_SPACE['batch_size']['high'])
     u_batch      = trial.suggest_int('u_batch', SEARCH_SPACE['ubatch_size']['low'], SEARCH_SPACE['ubatch_size']['high'])
-    threads      = trial.suggest_int('threads', SEARCH_SPACE['threads']['low'], SEARCH_SPACE['threads']['high'])
+    threads      = trial.suggest_categorical('threads', SEARCH_SPACE['threads'])
     gpu_layers   = trial.suggest_int('gpu_layers', SEARCH_SPACE['gpu_layers']['low'], SEARCH_SPACE['gpu_layers']['high'])
 
     # Build llama-bench command 
