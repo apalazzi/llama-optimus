@@ -12,7 +12,7 @@ import subprocess
 from optuna.samplers import TPESampler
 from optuna.samplers import GridSampler
 from .override_patterns import OVERRIDE_PATTERNS   
-from .search_space import SEARCH_SPACE, max_threads 
+from .search_space import SEARCH_SPACE, CACHE_COMBINATIONS, max_threads 
 
 def list_available_devices(llama_bench_path):
     """
@@ -223,6 +223,10 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, d
     threads      = trial.suggest_int('threads', SEARCH_SPACE['threads']['low'], SEARCH_SPACE['threads']['high'])
     gpu_layers   = trial.suggest_int('gpu_layers', SEARCH_SPACE['gpu_layers']['low'], SEARCH_SPACE['gpu_layers']['high'])
 
+    # Sample cache type combination
+    cache_combo_key = trial.suggest_categorical('cache_type', SEARCH_SPACE['cache_type'])
+    cache_k, cache_v = CACHE_COMBINATIONS[cache_combo_key]
+
     # ----------  constraint check [under development/testing] -------------
     # llama.cpp usually requires batch_size >= ubatch_size; 
     # most users report lower performance if constrain is violated.  Prune such trials early.
@@ -241,6 +245,8 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, d
         "--threads"        , str(threads),    # (-t  flag) (default 2)  
         "-ngl"             , str(gpu_layers), # (-ngl or --n-gpu-layers flag)
         "--model"          , model_path,      # 
+        "--cache-type-k"   , cache_k,         # Key cache type
+        "--cache-type-v"   , cache_v,         # Value cache type
         "-r"               , str(repeat),     # number of benchmark runs/repetitions for each configuration; mean value and std calculated from it 
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
@@ -273,19 +279,20 @@ def objective_1(trial, n_tokens, metric, repeat, llama_bench_path, model_path, d
     # i.e. this trial will be considered a failure but not fatal.
 
 
-def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers, device=None):
+def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_mode, batch, u_batch, threads, gpu_layers, cache_k, cache_v, device=None):
     """
     Objective function for Optuna scan over the entire categorical parameter space
 
     Extra parameters:
         override-tensor;
-        batch, u_batch, threads, gpu_layers: are all fixed (best parameters from initial Trials_1) 
+        batch, u_batch, threads, gpu_layers: are all fixed (best parameters from initial Trials_1)
+        cache_k, cache_v: best cache types from Stage 1
     
     Returns:
         float: The throughput value to maximize (tokens/sec).
     """
     # for debug
-    print(f"Running objective_2 with batch={batch}, u_batch={u_batch}, threads={threads}, gpu_layers={gpu_layers}")
+    print(f"Running objective_2 with batch={batch}, u_batch={u_batch}, threads={threads}, gpu_layers={gpu_layers}, cache_k={cache_k}, cache_v={cache_v}")
 
 
     # Build llama-bench command (can edit to add more flags)
@@ -296,6 +303,8 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         "--threads"        , str(threads),    # (-t  flag) (default 2)  
         "-ngl"             , str(gpu_layers), # (-ngl or --n-gpu-layers flag)
         "--model"          , model_path,      # 
+        "--cache-type-k"   , cache_k,         # Key cache type (fixed from Stage 1)
+        "--cache-type-v"   , cache_v,         # Value cache type (fixed from Stage 1)
         "-r"               , str(repeat),     # number of benchmark runs/repetitions for each configuration; mean value and std calculated from it 
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
@@ -336,7 +345,7 @@ def objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         return 0.0
 
 
-def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, flash_attn, override_mode, device=None):
+def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, override_pattern, flash_attn, override_mode, cache_k, cache_v, device=None):
     """
     Objective function for Optuna optimization. 
     After we select promising '--override-tensor' and '--flash-attn'
@@ -349,6 +358,7 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         repeat (int): Number of llama-bench repetitions for every trial; used to calculate robust <token/s> value
         override_tensor
         flash_attn
+        cache_k, cache_v: best cache types from Stage 1
     Returns:
         float: The throughput value to maximize (tokens/sec).
     """
@@ -366,6 +376,8 @@ def objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, o
         "--threads"        , str(threads),    # (-t  flag) (default 2)  
         "-ngl"             , str(gpu_layers), # (-ngl or --n-gpu-layers flag)
         "--model"          , model_path,      # 
+        "--cache-type-k"   , cache_k,         # Key cache type (fixed from earlier stages)
+        "--cache-type-v"   , cache_v,         # Value cache type (fixed from earlier stages)
         "-r"               , str(repeat),     # number of benchmark runs/repetitions for each configuration; mean value and std calculated from it 
         "-o"               , "csv",           # save temporary .csv file with llama-bench outputs
         "--no-warmup"     # deactivate internal llama-bench warmup
@@ -460,7 +472,7 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     At the end, print the best configuration and ready-to-use commands for llama-server/llama-bench.
 
     Given the large parameter space, the optimization runs in 3 stages. 
-    - Stage 1: over the numerical space: 'gpu_layers', 'threads', 'batch' and 'ubatch' 
+    - Stage 1: over the numerical space: 'gpu_layers', 'threads', 'batch' and 'ubatch', and cache type combinations
     - Stage 2: over the categorical space: 'override_tensor' and 'flash_attn'
     - Stage 3: with the best of previous config, run again over the numerical space. 
 
@@ -513,13 +525,18 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         n_trials_2 = 2 # since flash_attn: <0|1> 
         search2 = {'flash_attn': SEARCH_SPACE['flash_attn']} 
 
+    # Extract cache types from best_1 for Stage 2 and 3
+    cache_combo_key = best_1['cache_type']
+    cache_k, cache_v = CACHE_COMBINATIONS[cache_combo_key]
+
     # in this case, use grid sampler
     sampler_2 = optuna.samplers.GridSampler(search2)
     study_2 = optuna.create_study(direction="maximize", sampler=sampler_2)
     # use lambda to inject metric, repeat ...  
     study_2.optimize(lambda trial: objective_2(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
                                                override_mode, best_1['batch'], best_1['u_batch'], 
-                                               best_1['threads'], best_1['gpu_layers'], device), n_trials=n_trials_2)
+                                               best_1['threads'], best_1['gpu_layers'],
+                                               cache_k, cache_v, device), n_trials=n_trials_2)
     print("")
     print("Best config Stage_2:", study_2.best_trial.params)
     print(f"Best Stage_2 {metric} tokens/sec:", study_2.best_value)
@@ -544,7 +561,8 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
     study_3 = optuna.create_study(direction="maximize", sampler=sampler_3)
     # use lambda to inject metric, repeat ...  
     study_3.optimize(lambda trial: objective_3(trial, n_tokens, metric, repeat, llama_bench_path, model_path, 
-                                               best_2['override_tensor'], best_2['flash_attn'], override_mode, device), n_trials=n_trials)
+                                               best_2['override_tensor'], best_2['flash_attn'], override_mode,
+                                               cache_k, cache_v, device), n_trials=n_trials)
     print("")
     print("Best config Stage_3:", study_3.best_trial.params)
     print(f"Best Stage_3 {metric} tokens/sec:", study_3.best_value)
@@ -570,6 +588,8 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" --batch-size {best_3['batch']}"
         f" --ubatch-size {best_3['u_batch']}"
         f" -ngl {best_3['gpu_layers']}"
+        f" --cache-type-k {cache_k}"
+        f" --cache-type-v {cache_v}"
         #f" --flash-attn-type {best['flash_type']}"
     )
 
@@ -604,6 +624,8 @@ def run_optimization(n_trials, n_tokens, metric, repeat, llama_bench_path, model
         f" --batch-size {best_3['batch']}"
         f" --ubatch-size {best_3['u_batch']}"
         f" -ngl {best_3['gpu_layers']}"
+        f" --cache-type-k {cache_k}"
+        f" --cache-type-v {cache_v}"
         f" --flash-attn {best_2['flash_attn']}"  # in llama-server, --flash-attn is type 'int', accepts <0|1> values.
         #f" --override-tensor {OVERRIDE_PATTERNS[best_2['override_tensor']]}"
         f" -n 128 -p 256 -r 6 --no-warmup --progress "
